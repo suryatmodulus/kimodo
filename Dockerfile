@@ -1,10 +1,22 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Hugging Face Spaces Docker template for this repo.
+# Runs BOTH:
+# - kimodo_textencoder (Gradio on 9550, internal)
+# - kimodo_demo        (Viser UI on 7860, public)
+#
 FROM nvcr.io/nvidia/pytorch:24.10-py3
 
 # Avoid some interactive prompts + make pip quieter/reproducible-ish
 ENV DEBIAN_FRONTEND=noninteractive \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    # Persist HF caches on Spaces when /data is enabled.
+    HF_HOME=/data/.huggingface \
+    XDG_CACHE_HOME=/data/.cache \
+    PIP_CACHE_DIR=/data/.cache/pip
 
 # Where your code will live inside the container
 WORKDIR /workspace
@@ -13,7 +25,6 @@ WORKDIR /workspace
 RUN apt-get update && apt-get install -y --no-install-recommends \
       git curl ca-certificates \
       cmake build-essential \
-      gosu \
     && rm -rf /var/lib/apt/lists/*
 
 # Some base images ship a broken `/usr/local/bin/cmake` shim (from a partial pip install),
@@ -21,25 +32,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Prefer the system cmake.
 RUN rm -f /usr/local/bin/cmake || true
 
-# Install from docker_requirements.txt: kimodo editable (-e .),
-# but MotionCorrection non-editable (./MotionCorrection). The -e . line ensures [project.scripts]
-# from pyproject.toml are installed (kimodo_gen, kimodo_demo, kimodo_textencoder).
-# SKIP_MOTION_CORRECTION_IN_SETUP=1 so setup.py does not bundle motion_correction; it is
-# installed separately from ./MotionCorrection in the requirements file (non-editable).
-COPY docker_requirements.txt /workspace/docker_requirements.txt
-COPY setup.py /workspace/setup.py
-COPY pyproject.toml /workspace/pyproject.toml
-COPY kimodo /workspace/kimodo
-COPY MotionCorrection /workspace/MotionCorrection
+
+# Copy the requirements (which contains, kimodo, viser and SOMA)
+COPY requirements.txt /workspace/requirements.txt
+
+# For private GitHub repos in requirements.txt:
+# - On Hugging Face Spaces: add a Secret named GITHUB_TOKEN in Space Settings.
+#   HF exposes it at build time via Docker secret mount (no build-arg).
+# - Local build: docker build --build-arg GITHUB_TOKEN=ghp_xxxx .
+ARG GITHUB_TOKEN=
 
 RUN --mount=type=cache,target=/root/.cache/pip \
+    --mount=type=secret,id=GITHUB_TOKEN,mode=0444,required=false \
     python -m pip install --upgrade pip \
- && SKIP_MOTION_CORRECTION_IN_SETUP=1 python -m pip install -r docker_requirements.txt
+ && python -m pip install -r requirements.txt;
 
-# Use the docker-entrypoint script, to allow the docker to run as the actual user instead of root
-COPY kimodo/scripts/docker-entrypoint.sh /usr/local/bin/docker-entrypoint
-RUN chmod +x /usr/local/bin/docker-entrypoint
 
-# Default command (change to your entrypoint if you have one)
-ENTRYPOINT ["docker-entrypoint"]
-CMD ["bash"]
+COPY start.sh /start.sh
+RUN chmod +x /start.sh
+
+EXPOSE 7860
+ENTRYPOINT ["/start.sh"]
